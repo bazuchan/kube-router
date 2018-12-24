@@ -31,11 +31,12 @@ import (
 )
 
 const (
-	networkPolicyAnnotation      = "net.beta.kubernetes.io/network-policy"
-	kubePodFirewallChainPrefix   = "KUBE-POD-FW-"
-	kubeNetworkPolicyChainPrefix = "KUBE-NWPLCY-"
-	kubeSourceIpSetPrefix        = "KUBE-SRC-"
-	kubeDestinationIpSetPrefix   = "KUBE-DST-"
+	networkPolicyAnnotation         = "net.beta.kubernetes.io/network-policy"
+	kubePodFirewallChainPrefix      = "KUBE-POD-FW-"
+	kubePodFirewallInputChainPrefix = "KUBE-NODE-"
+	kubeNetworkPolicyChainPrefix    = "KUBE-NWPLCY-"
+	kubeSourceIpSetPrefix           = "KUBE-SRC-"
+	kubeDestinationIpSetPrefix      = "KUBE-DST-"
 )
 
 // Network policy controller provides both ingress and egress filtering for the pods as per the defined network
@@ -693,6 +694,15 @@ func (npc *NetworkPolicyController) syncPodFirewallChains(version string) (map[s
 		}
 		activePodFwChains[podFwChainName] = true
 
+		podFwInputChainName := podFirewallInputChainName(pod.namespace, pod.name, version)
+		if pod.ip == npc.nodeIP.String() {
+			err = iptablesCmdHandler.NewChain("filter", podFwInputChainName)
+			if err != nil && err.(*iptables.Error).ExitStatus() != 1 {
+				return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+			}
+			activePodFwChains[podFwInputChainName] = true
+		}
+
 		// add entries in pod firewall to run through required network policies
 		for _, policy := range *npc.networkPoliciesInfo {
 			if _, ok := policy.targetPods[pod.ip]; ok {
@@ -709,10 +719,22 @@ func (npc *NetworkPolicyController) syncPodFirewallChains(version string) (map[s
 						return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
 					}
 				}
+				if pod.ip == npc.nodeIP.String() {
+					exists, err := iptablesCmdHandler.Exists("filter", podFwInputChainName, args...)
+					if err != nil {
+						return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+					}
+					if !exists {
+						err := iptablesCmdHandler.Insert("filter", podFwInputChainName, 1, args...)
+						if err != nil && err.(*iptables.Error).ExitStatus() != 1 {
+							return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+						}
+					}
+				}
 			}
 		}
 
-		comment := "rule to permit the traffic traffic to pods when source is the pod's local node"
+		comment := "rule to permit the traffic to pods when source is the pod's local node"
 		args := []string{"-m", "comment", "--comment", comment, "-m", "addrtype", "--src-type", "LOCAL", "-d", pod.ip, "-j", "ACCEPT"}
 		exists, err := iptablesCmdHandler.Exists("filter", podFwChainName, args...)
 		if err != nil {
@@ -722,6 +744,21 @@ func (npc *NetworkPolicyController) syncPodFirewallChains(version string) (map[s
 			err := iptablesCmdHandler.Insert("filter", podFwChainName, 1, args...)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+			}
+		}
+
+		if pod.ip == npc.nodeIP.String() {
+			comment := "rule to permit the traffic to pods when source is the pod's local node"
+			args := []string{"-m", "comment", "--comment", comment, "-m", "addrtype", "--src-type", "LOCAL", "-d", pod.ip, "-j", "ACCEPT"}
+			exists, err := iptablesCmdHandler.Exists("filter", podFwInputChainName, args...)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+			}
+			if !exists {
+				err := iptablesCmdHandler.Insert("filter", podFwInputChainName, 1, args...)
+				if err != nil {
+					return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+				}
 			}
 		}
 
@@ -751,6 +788,24 @@ func (npc *NetworkPolicyController) syncPodFirewallChains(version string) (map[s
 			err := iptablesCmdHandler.Insert("filter", "OUTPUT", 1, args...)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+			}
+		}
+
+		// ensure there is rule in filter table and INPUT chain to jump to pod specific firewall chain
+		// this rule applies only to host networked pods
+		if pod.ip == npc.nodeIP.String() {
+			comment = "rule to jump traffic destined to POD name:" + pod.name + " namespace: " + pod.namespace +
+				" to chain " + podFwInputChainName
+			args = []string{"-m", "comment", "--comment", comment, "-d", pod.ip, "-j", podFwInputChainName}
+			exists, err = iptablesCmdHandler.Exists("filter", "INPUT", args...)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+			}
+			if !exists {
+				err := iptablesCmdHandler.Insert("filter", "INPUT", 1, args...)
+				if err != nil {
+					return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+				}
 			}
 		}
 
@@ -792,6 +847,19 @@ func (npc *NetworkPolicyController) syncPodFirewallChains(version string) (map[s
 			err := iptablesCmdHandler.Insert("filter", podFwChainName, 1, args...)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+			}
+		}
+
+		if pod.ip == npc.nodeIP.String() {
+			exists, err = iptablesCmdHandler.Exists("filter", podFwInputChainName, args...)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+			}
+			if !exists {
+				err := iptablesCmdHandler.Insert("filter", podFwInputChainName, 1, args...)
+				if err != nil {
+					return nil, fmt.Errorf("Failed to run iptables command: %s", err.Error())
+				}
 			}
 		}
 	}
@@ -929,6 +997,11 @@ func cleanupStaleRules(activePolicyChains, activePodFwChains, activePolicyIPSets
 				cleanupPodFwChains = append(cleanupPodFwChains, chain)
 			}
 		}
+		if strings.HasPrefix(chain, kubePodFirewallInputChainPrefix) {
+			if _, ok := activePodFwChains[chain]; !ok {
+				cleanupPodFwChains = append(cleanupPodFwChains, chain)
+			}
+		}
 	}
 	for _, set := range ipsets.Sets {
 		if strings.HasPrefix(set.Name, kubeSourceIpSetPrefix) ||
@@ -950,6 +1023,10 @@ func cleanupStaleRules(activePolicyChains, activePodFwChains, activePolicyIPSets
 		if err != nil {
 			return fmt.Errorf("failed to list rules in filter table, OUTPUT chain due to %s", err.Error())
 		}
+		inputChainRules, err := iptablesCmdHandler.List("filter", "INPUT")
+		if err != nil {
+			return fmt.Errorf("failed to list rules in filter table, INPUT chain due to %s", err.Error())
+		}
 
 		// TODO delete rule by spec, than rule number to avoid extra loop
 		var realRuleNo int
@@ -968,6 +1045,16 @@ func cleanupStaleRules(activePolicyChains, activePodFwChains, activePolicyIPSets
 				err = iptablesCmdHandler.Delete("filter", "OUTPUT", strconv.Itoa(i-realRuleNo))
 				if err != nil {
 					return fmt.Errorf("failed to delete rule: %s from the OUTPUT chain of filter table due to %s", rule, err.Error())
+				}
+				realRuleNo++
+			}
+		}
+		realRuleNo = 0
+		for i, rule := range inputChainRules {
+			if strings.Contains(rule, chain) {
+				err = iptablesCmdHandler.Delete("filter", "INPUT", strconv.Itoa(i-realRuleNo))
+				if err != nil {
+					return fmt.Errorf("failed to delete rule: %s from the INPUT chain of filter table due to %s", rule, err.Error())
 				}
 				realRuleNo++
 			}
@@ -1405,6 +1492,12 @@ func podFirewallChainName(namespace, podName string, version string) string {
 	return kubePodFirewallChainPrefix + encoded[:16]
 }
 
+func podFirewallInputChainName(namespace, podName string, version string) string {
+	hash := sha256.Sum256([]byte(namespace + podName + version))
+	encoded := base32.StdEncoding.EncodeToString(hash[:])
+	return kubePodFirewallInputChainPrefix + encoded[:16]
+}
+
 func networkPolicyChainName(namespace, policyName string, version string) string {
 	hash := sha256.Sum256([]byte(namespace + policyName + version))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
@@ -1489,10 +1582,26 @@ func (npc *NetworkPolicyController) Cleanup() {
 		}
 	}
 
+	// delete jump rules in OUTPUT chain to pod specific firewall chain
+	inputChainRules, err := iptablesCmdHandler.List("filter", "INPUT")
+	if err != nil {
+		glog.Errorf("Failed to delete iptable rules as part of cleanup")
+		return
+	}
+
+	// TODO: need a better way to delte rule with out using number
+	realRuleNo = 0
+	for i, rule := range inputChainRules {
+		if strings.Contains(rule, kubePodFirewallInputChainPrefix) {
+			err = iptablesCmdHandler.Delete("filter", "INPUT", strconv.Itoa(i-realRuleNo))
+			realRuleNo++
+		}
+	}
+
 	// flush and delete pod specific firewall chain
 	chains, err := iptablesCmdHandler.ListChains("filter")
 	for _, chain := range chains {
-		if strings.HasPrefix(chain, kubePodFirewallChainPrefix) {
+		if strings.HasPrefix(chain, kubePodFirewallChainPrefix) || strings.HasPrefix(chain, kubePodFirewallInputChainPrefix) {
 			err = iptablesCmdHandler.ClearChain("filter", chain)
 			if err != nil {
 				glog.Errorf("Failed to cleanup iptables rules: " + err.Error())
