@@ -445,70 +445,6 @@ func (nsc *NetworkServicesController) setupIpvsFirewall() error {
 	}
 	nsc.ipsetMap[ipvsServicesIPSetName] = ipset
 
-	// Setup a custom iptables chain to explicitly allow input traffic to
-	// ipvs services only.
-	iptablesCmdHandler, err := iptables.New()
-	if err != nil {
-		return errors.New("Failed to initialize iptables executor" + err.Error())
-	}
-
-	// ClearChain either clears an existing chain or creates a new one.
-	err = iptablesCmdHandler.ClearChain("filter", ipvsFirewallChainName)
-	if err != nil {
-		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
-	}
-
-	var comment string
-	var args []string
-
-	comment = "allow input traffic to ipvs services"
-	args = []string{"-m", "comment", "--comment", comment,
-		"-m", "set", "--match-set", ipvsServicesIPSetName, "dst,dst",
-		"-j", "ACCEPT"}
-	exists, err := iptablesCmdHandler.Exists("filter", ipvsFirewallChainName, args...)
-	if err != nil {
-		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
-	}
-	if !exists {
-		err := iptablesCmdHandler.Insert("filter", ipvsFirewallChainName, 1, args...)
-		if err != nil {
-			return fmt.Errorf("Failed to run iptables command: %s", err.Error())
-		}
-	}
-
-	comment = "allow icmp echo requests to service IPs"
-	args = []string{"-m", "comment", "--comment", comment,
-		"-p", "icmp", "--icmp-type", "echo-request",
-		"-j", "ACCEPT"}
-	err = iptablesCmdHandler.AppendUnique("filter", ipvsFirewallChainName, args...)
-	if err != nil {
-		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
-	}
-
-	// We exclude the local addresses here as that would otherwise block all
-	// traffic to local addresses if any NodePort service exists.
-	comment = "reject all unexpected traffic to service IPs"
-	args = []string{"-m", "comment", "--comment", comment,
-		"-m", "set", "!", "--match-set", localIPsIPSetName, "dst",
-		"-j", "REJECT", "--reject-with", "icmp-port-unreachable"}
-	err = iptablesCmdHandler.AppendUnique("filter", ipvsFirewallChainName, args...)
-	if err != nil {
-		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
-	}
-
-	// Pass incomming traffic into our custom chain.
-	ipvsFirewallInputChainRule := getIpvsFirewallInputChainRule()
-	exists, err = iptablesCmdHandler.Exists("filter", "INPUT", ipvsFirewallInputChainRule...)
-	if err != nil {
-		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
-	}
-	if !exists {
-		err = iptablesCmdHandler.Insert("filter", "INPUT", 1, ipvsFirewallInputChainRule...)
-		if err != nil {
-			return fmt.Errorf("Failed to run iptables command: %s", err.Error())
-		}
-	}
-
 	return nil
 }
 
@@ -568,6 +504,67 @@ func (nsc *NetworkServicesController) syncIpvsFirewall() error {
 	   - update ipsets based on currently active IPVS services
 	*/
 	var err error
+
+	// Setup a custom iptables chain to explicitly allow input traffic to
+	// ipvs services only.
+	iptablesCmdHandler, err := iptables.New()
+	if err != nil {
+		return errors.New("Failed to initialize iptables executor" + err.Error())
+	}
+
+	// ClearChain either clears an existing chain or creates a new one.
+	iptablesCmdHandler.NewChain("filter", ipvsFirewallChainName)
+
+	var comment string
+	var args []string
+
+	comment = "allow input traffic to ipvs services"
+	args = []string{"-m", "comment", "--comment", comment,
+		"-m", "set", "--match-set", ipvsServicesIPSetName, "dst,dst",
+		"-j", "ACCEPT"}
+	exists, err := iptablesCmdHandler.Exists("filter", ipvsFirewallChainName, args...)
+	if err != nil {
+		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
+	}
+	if !exists {
+		err := iptablesCmdHandler.Insert("filter", ipvsFirewallChainName, 1, args...)
+		if err != nil {
+			return fmt.Errorf("Failed to run iptables command: %s", err.Error())
+		}
+	}
+
+	comment = "allow icmp echo requests to service IPs"
+	args = []string{"-m", "comment", "--comment", comment,
+		"-p", "icmp", "--icmp-type", "echo-request",
+		"-j", "ACCEPT"}
+	err = iptablesCmdHandler.AppendUnique("filter", ipvsFirewallChainName, args...)
+	if err != nil {
+		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
+	}
+
+	// We exclude the local addresses here as that would otherwise block all
+	// traffic to local addresses if any NodePort service exists.
+	comment = "reject all unexpected traffic to service IPs"
+	args = []string{"-m", "comment", "--comment", comment,
+		"-m", "set", "!", "--match-set", localIPsIPSetName, "dst",
+		"-j", "REJECT", "--reject-with", "icmp-port-unreachable"}
+	err = iptablesCmdHandler.AppendUnique("filter", ipvsFirewallChainName, args...)
+	if err != nil {
+		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
+	}
+
+	// Pass incomming traffic into our custom chain.
+	ipvsFirewallInputChainRule := getIpvsFirewallInputChainRule()
+	exists, err = iptablesCmdHandler.Exists("filter", "INPUT", ipvsFirewallInputChainRule...)
+	if err != nil {
+		return fmt.Errorf("Failed to run iptables command: %s", err.Error())
+	}
+	if !exists {
+		err = iptablesCmdHandler.Insert("filter", "INPUT", 1, ipvsFirewallInputChainRule...)
+		if err != nil {
+			return fmt.Errorf("Failed to run iptables command: %s", err.Error())
+		}
+	}
 
 	localIPsIPSet := nsc.ipsetMap[localIPsIPSetName]
 
