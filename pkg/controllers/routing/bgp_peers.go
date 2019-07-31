@@ -39,7 +39,7 @@ func (nrc *NetworkRoutingController) syncInternalPeers() {
 	// get the current list of the nodes from API server
 	nodes, err := nrc.clientset.CoreV1().Nodes().List(metav1.ListOptions{})
 	if err != nil {
-		glog.Errorf("Failed to list nodes from API server due to: %s. Can not perform BGP peer sync", err.Error())
+		glog.Errorf("Failed to list nodes from API server due to: %s. Cannot perform BGP peer sync", err.Error())
 		return
 	}
 	if nrc.MetricsEnabled {
@@ -350,9 +350,9 @@ func (nrc *NetworkRoutingController) OnNodeUpdate(obj interface{}) {
 	}
 
 	// update export policies so that NeighborSet gets updated with new set of nodes
-	err := nrc.addExportPolicies()
+	err := nrc.AddPolicies()
 	if err != nil {
-		glog.Errorf("Error adding BGP export policies: %s", err.Error())
+		glog.Errorf("Error adding BGP policies: %s", err.Error())
 	}
 
 	if nrc.bgpEnableInternal {
